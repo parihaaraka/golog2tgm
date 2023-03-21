@@ -12,6 +12,7 @@ const (
 	cfgChat
 	cfgPeriod
 	cfgTimeZone
+	uncork
 )
 
 type logMessage struct {
@@ -66,6 +67,11 @@ func (w *Worker) SetPeriod(periodSec uint) {
 	w.cCfg <- cfgCommand{cfgPeriod, periodSec}
 }
 
+// Force send aggregated alerts
+func (w *Worker) Uncork() {
+	w.cCfg <- cfgCommand{uncork, nil}
+}
+
 // Start worker.
 //
 // srcRoot is a common part of the sources path being printed in a call stack (to exclude external calls and to truncate long paths).
@@ -108,7 +114,15 @@ func Start(
 			}
 		}
 
-		sendTicker := time.NewTicker(5 * time.Minute)
+		sendAndClearBatch := func() {
+			// ignore cancellation via ctx to finalyze sending when the caller is stopping
+			go send()(context.Background())
+			// ignore unsuccessful sendings
+			w.m.finalizedBatch.clear()
+		}
+
+		period := 5 * time.Minute
+		sendTicker := time.NewTicker(period)
 		for {
 			select {
 			case <-ctx.Done():
@@ -125,7 +139,11 @@ func Start(
 				case cfgChat:
 					dest = cfg.value.(chat)
 				case cfgPeriod:
-					sendTicker.Reset(time.Duration(cfg.value.(uint)) * time.Second)
+					period = time.Duration(cfg.value.(uint)) * time.Second
+					fallthrough // uncork on period change
+				case uncork:
+					sendAndClearBatch()
+					sendTicker.Reset(period)
 				case cfgTimeZone:
 					if c, ok := cfg.value.(struct {
 						name   string
@@ -135,10 +153,7 @@ func Start(
 					}
 				}
 			case <-sendTicker.C:
-				// ignore cancellation via ctx to finalyze sending when the caller is stopping
-				go send()(context.Background())
-				// ignore unsuccessful sendings
-				w.m.finalizedBatch.clear()
+				sendAndClearBatch()
 			}
 		}
 	}()

@@ -114,7 +114,8 @@ func main() {
 	log.Logger = zerolog.New(output).With().Timestamp().Caller().Logger().Hook(TgmHook{w})
 	ctx = log.Logger.WithContext(ctx)
 
-	log.Ctx(ctx).Error().Msg("start")
+	log.Ctx(ctx).Info().Msg("start")
+	w.Uncork()
 	go func() {
 		for range time.Tick(50 * time.Millisecond) {
 			i := rand.Intn(len(testMessages))
