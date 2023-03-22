@@ -187,7 +187,7 @@ func (s *sender) send(ctx context.Context, messages []string) {
 			}
 			if !strings.Contains(string(body), `"ok":true`) {
 				if s.errorHandler != nil {
-					s.errorHandler(string(body))
+					s.errorHandler(fmt.Sprintf("tgm response: %s\nrequest data: %s", string(body), data.Encode()))
 				}
 			}
 		}()
