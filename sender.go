@@ -84,7 +84,8 @@ func (s *sender) prepareMessages(b *batch) []string {
 			buf.WriteString(" ```")
 		} else {
 			buf.WriteString("message: `")
-			buf.WriteString(smp.message)
+			putEscaped(buf, smp.message)
+			//buf.WriteString(smp.message)
 			buf.WriteString("`")
 		}
 
