@@ -2,6 +2,7 @@ package golog2tgm
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type chat struct {
@@ -27,9 +29,28 @@ type sender struct {
 	chat
 }
 
+func putFixed(out *strings.Builder, value string) {
+	for i, c := range value {
+		if c == 0xfffd || !utf8.ValidRune(c) {
+			_, s := utf8.DecodeRuneInString(value[i:])
+			out.WriteString("\\\\x")
+			out.WriteString(hex.EncodeToString([]byte(value[i : i+s])))
+			continue
+		}
+		out.WriteRune(c)
+	}
+}
+
 func putEscaped(out *strings.Builder, value string) {
-	for _, c := range value {
-		if strings.ContainsRune("_*[]()~`>#+-=|{}.!", c) {
+	for i, c := range value {
+		if c == 0xfffd || !utf8.ValidRune(c) {
+			_, s := utf8.DecodeRuneInString(value[i:])
+			out.WriteString("\\\\x")
+			out.WriteString(hex.EncodeToString([]byte(value[i : i+s])))
+			continue
+		}
+
+		if strings.ContainsRune("\\_*[]()~`>#+-=|{}.!", c) {
 			out.WriteRune('\\')
 		}
 		out.WriteRune(c)
@@ -61,6 +82,7 @@ func (s *sender) prepareMessages(b *batch) []string {
 
 	format_msg := func(smp *msgSample) *strings.Builder {
 		buf := &strings.Builder{}
+		buf.Grow(maxSize)
 		if s.intro == nil {
 			buf.WriteString(fmt.Sprintf("_*%d* messages like:_\n", smp.count))
 		} else {
@@ -80,12 +102,11 @@ func (s *sender) prepareMessages(b *batch) []string {
 		// \n before closing ``` prints as is, so there is a space (just to be on the safe side).
 		if strings.ContainsRune(smp.message, '\n') {
 			buf.WriteString("message:\n```\n")
-			buf.WriteString(smp.message)
+			putFixed(buf, smp.message)
 			buf.WriteString(" ```")
 		} else {
 			buf.WriteString("message: `")
 			putEscaped(buf, smp.message)
-			//buf.WriteString(smp.message)
 			buf.WriteString("`")
 		}
 
