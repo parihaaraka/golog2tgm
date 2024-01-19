@@ -27,6 +27,7 @@ var testMessages = []string{
 	"— Какая милая девочка! Сколько тебе?\n— Грамм.",
 	"— Что ты попросишь у Деда Мороза в новом году?\n— Пощады!",
 	"non-utf8 characters: \xff\xff",
+	" message to be skipped",
 }
 
 type TgmHook struct {

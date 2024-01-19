@@ -2,6 +2,7 @@ package golog2tgm
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -42,7 +43,9 @@ type Worker struct {
 //
 // pcs allows to add call stack to the sample.
 func (w *Worker) PushMessage(level int8, hash uint64, msg string, pcs []uintptr) {
-	w.cMsg <- logMessage{level, hash, msg, pcs}
+	if !strings.HasPrefix(msg, " ") {
+		w.cMsg <- logMessage{level, hash, msg, pcs}
+	}
 }
 
 // Set teleram message caption (e.g. your daemon name)
