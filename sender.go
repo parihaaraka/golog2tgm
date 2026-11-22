@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/rs/zerolog/log"
 )
 
 type chat struct {
@@ -26,7 +28,29 @@ type sender struct {
 	caption      string
 	srcRoot      string
 	loc          *time.Location
+	client       *http.Client
 	chat
+}
+
+var charsToEscape = [128]bool{
+	'!':  true,
+	'#':  true,
+	'(':  true,
+	')':  true,
+	'*':  true,
+	'-':  true,
+	'.':  true,
+	'=':  true,
+	'>':  true,
+	'[':  true,
+	'\\': true,
+	']':  true,
+	'_':  true,
+	'`':  true,
+	'{':  true,
+	'|':  true,
+	'}':  true,
+	'~':  true,
 }
 
 func putFixed(out *strings.Builder, value string) {
@@ -36,6 +60,8 @@ func putFixed(out *strings.Builder, value string) {
 			out.WriteString("\\\\x")
 			out.WriteString(hex.EncodeToString([]byte(value[i : i+s])))
 			continue
+		} else if c == '\\' || c == '`' {
+			out.WriteByte('\\')
 		}
 		out.WriteRune(c)
 	}
@@ -50,10 +76,14 @@ func putEscaped(out *strings.Builder, value string) {
 			continue
 		}
 
-		if strings.ContainsRune("\\_*[]()~`>#+-=|{}.!", c) {
-			out.WriteRune('\\')
+		if c < utf8.RuneSelf {
+			if charsToEscape[c] {
+				out.WriteByte('\\')
+			}
+			out.WriteByte(byte(c))
+		} else {
+			out.WriteRune(c)
 		}
-		out.WriteRune(c)
 	}
 }
 
@@ -62,39 +92,38 @@ func (s *sender) prepareMessages(b *batch) []string {
 		return []string{}
 	}
 
-	maxSize := 4096 // telegram max message size
+	const maxSize = 4096 // telegram max message size
 	out := &strings.Builder{}
 	if len(s.caption) > 0 {
-		out.WriteRune('*') // begin bold
+		out.WriteByte('*') // begin bold
 		putEscaped(out, s.caption)
-		out.WriteRune('*') // end bold
-		out.WriteRune('\n')
+		out.WriteByte('*') // end bold
+		out.WriteByte('\n')
 	}
 
-	if b.tsStart != b.tsFinish {
-		out.WriteString(fmt.Sprintf(
+	if b.tsFinish.Sub(b.tsStart).Seconds() >= 1 {
+		fmt.Fprintf(out,
 			"%s \\- %s %s\n",
 			b.tsStart.In(s.loc).Format("15:04:05"),
 			b.tsFinish.In(s.loc).Format("15:04:05"),
-			s.loc.String(),
-		))
+			s.loc.String())
 	}
 
 	format_msg := func(smp *msgSample) *strings.Builder {
 		buf := &strings.Builder{}
 		buf.Grow(maxSize)
 		if s.intro == nil {
-			buf.WriteString(fmt.Sprintf("_*%d* messages like:_\n", smp.count))
+			fmt.Fprintf(buf, "_*%d* messages like:_\n", smp.count)
 		} else {
 			buf.WriteString(s.intro(smp.level, smp.count))
 		}
 
-		if smp.tsFirst == smp.tsLast {
-			buf.WriteString(fmt.Sprintf("time: `%s`\n", smp.tsFirst.In(s.loc).Format("15:04:05.000")))
+		if smp.tsFirst.Equal(smp.tsLast) {
+			fmt.Fprintf(buf, "time: `%s`\n", smp.tsFirst.In(s.loc).Format("15:04:05.000"))
 		} else {
 			delta := smp.tsLast.Sub(smp.tsFirst)
-			buf.WriteString(fmt.Sprintf("first: `%s`\nlast: `+%.3f sec`\n",
-				smp.tsFirst.In(s.loc).Format("15:04:05.000"), delta.Seconds()))
+			fmt.Fprintf(buf, "first: `%s`\nlast: `+%.3f sec`\n",
+				smp.tsFirst.In(s.loc).Format("15:04:05.000"), delta.Seconds())
 		}
 
 		// Openinig ``` needs trailing \n to save first word (place for highlighter name).
@@ -110,7 +139,7 @@ func (s *sender) prepareMessages(b *batch) []string {
 			buf.WriteString("`")
 		}
 
-		if smp.pcs != nil && len(smp.pcs) > 0 {
+		if len(smp.pcs) > 0 {
 			callers := []string{}
 			addCallerIfLocal := func(f *runtime.Frame) {
 				if strings.HasPrefix(f.File, s.srcRoot) {
@@ -152,16 +181,17 @@ func (s *sender) prepareMessages(b *batch) []string {
 		if out.Len()+tmp.Len() <= maxSize {
 			// separate messages
 			{
-				tmp := out.String()
-				if !strings.HasSuffix(tmp, "\n") && !strings.HasSuffix(tmp, "```") {
+				cur := out.String()
+				if len(cur) > 0 && !strings.HasSuffix(cur, "\n") && !strings.HasSuffix(cur, "```") {
 					out.WriteRune('\n')
 				}
 			}
 			out.WriteRune('\n')
 			out.WriteString(tmp.String())
 		} else {
-			res = append(res, out.String())
-			out.Reset()
+			if out.Len() > 0 {
+				res = append(res, out.String())
+			}
 			out = tmp
 		}
 	}
@@ -171,13 +201,23 @@ func (s *sender) prepareMessages(b *batch) []string {
 	return res
 }
 
-func (s *sender) send(ctx context.Context, messages []string) {
-	if s.chat.id == 0 {
+func (s *sender) send(ctx context.Context, messages []string, c chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s.errorHandler != nil {
+				s.errorHandler(fmt.Sprintf("%v", r))
+			}
+		}
+		if c != nil {
+			close(c)
+		}
+	}()
+
+	if s.chat.id == 0 || len(messages) == 0 {
 		return
 	}
 
 	var wg sync.WaitGroup
-	client := &http.Client{Timeout: 10 * time.Second}
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", s.chat.apiToken)
 
 	for _, msg := range messages {
@@ -186,7 +226,9 @@ func (s *sender) send(ctx context.Context, messages []string) {
 			"chat_id":    {strconv.FormatInt(s.chat.id, 10)},
 			"text":       {msg},
 		}
-		req, err := http.NewRequestWithContext(ctx, "POST", u, strings.NewReader(data.Encode()))
+		log.Ctx(context.Background()).Debug().Msgf("%v", data)
+		encodedData := data.Encode()
+		req, err := http.NewRequestWithContext(ctx, "POST", u, strings.NewReader(encodedData))
 		if err != nil {
 			if s.errorHandler != nil {
 				s.errorHandler(err.Error())
@@ -198,18 +240,19 @@ func (s *sender) send(ctx context.Context, messages []string) {
 
 		go func() {
 			defer wg.Done()
-			resp, err := client.Do(req)
+			resp, err := s.client.Do(req)
 			if err != nil {
 				return
 			}
 			defer resp.Body.Close()
-			body, err := io.ReadAll(resp.Body)
+			var sb strings.Builder
+			_, err = io.Copy(&sb, resp.Body)
 			if err != nil {
 				return
 			}
-			if !strings.Contains(string(body), `"ok":true`) {
+			if !strings.Contains(sb.String(), `"ok":true`) {
 				if s.errorHandler != nil {
-					s.errorHandler(fmt.Sprintf("tgm response: %s\nrequest data: %s", string(body), data.Encode()))
+					s.errorHandler(fmt.Sprintf("tgm response: %s\nrequest data: %s", sb.String(), encodedData))
 				}
 			}
 		}()

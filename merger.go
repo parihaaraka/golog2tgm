@@ -1,9 +1,9 @@
 package golog2tgm
 
 import (
+	"bytes"
 	"hash/fnv"
 	"sort"
-	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -88,7 +88,7 @@ func (b *batch) pushMsg(msg *logMessage) {
 	var i int
 	if msg.hash == 0 {
 		filterHex := len(msg.message) > 1
-		var essence strings.Builder
+		var essence bytes.Buffer
 		essence.Grow(256)
 
 		// level is included in the comparison
@@ -106,7 +106,7 @@ func (b *batch) pushMsg(msg *logMessage) {
 			}
 		}
 		hasher := fnv.New64a()
-		hasher.Write([]byte(essence.String()))
+		hasher.Write(essence.Bytes())
 		msg.hash = hasher.Sum64()
 		i = i + utf8.RuneLen(c)
 	}
@@ -131,24 +131,23 @@ func (b *batch) pushMsg(msg *logMessage) {
 	}
 
 	if i == 0 { // external hash
-		runes := []rune(msg.message)
-		if 250 < len(runes) {
-			var tmp strings.Builder
-			tmp.WriteString(string(runes[:250]))
-			tmp.WriteRune('…')
-			sample.message = tmp.String()
-		} else {
+		const maxRunes = 250
+		var n int
+		for j := range msg.message {
+			if n == maxRunes {
+				sample.message = msg.message[:j] + "…"
+				n = -1
+				break
+			}
+			n++
+		}
+		if n > 0 {
 			sample.message = msg.message
 		}
+	} else if i < len(msg.message) {
+		sample.message = msg.message[:i] + "…"
 	} else {
-		if i < len(msg.message) {
-			var tmp strings.Builder
-			tmp.WriteString(msg.message[:i])
-			tmp.WriteRune('…')
-			sample.message = tmp.String()
-		} else {
-			sample.message = msg.message
-		}
+		sample.message = msg.message
 	}
 	b.samples[msg.hash] = &sample
 	b.chronoIndex = append(b.chronoIndex, msg.hash)
